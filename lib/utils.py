@@ -3266,142 +3266,41 @@ def get_survival_likelihood(hazards_y, batch_dict, include_aug_loss = False, eps
 
 def compute_survival_curves(results, batch_dict, batch_dict_train, last_observed_points, surv_est = None, tp_res = 1, max_time_window = None, filename_suffix = None, validation = False, dataset = None, events_info_train_tuple = None, n_events = 1):
 	"""
-	Non-parametrically compute survival prob.
+	Non-parametrically estimate survival prob.
 	"""
 	if surv_est == 'Hazard':
 		if n_events == 1:
 			hazards_y_oi = results['hazards_y'][0]
-			# breakpoint()
 			surv_prob_total = []
 			for hazards_oi, pred_range in zip(hazards_y_oi, batch_dict['pred_horizon_idx']):
 				hazards_oi_sel = hazards_oi[pred_range[0]:].view(-1) 
-				surv_prob = torch.cumprod(hazards_oi_sel.mul(-1.0).add(1.0), dim = 0) # v1 Ren et al.
-				# surv_prob = torch.cumsum(hazards_oi_sel, dim = 0).mul(-1).exp() # v2 approximating survival integral
-				# surv_prob_alt = torch.cumprod(hazards_oi_sel.mul(-1.0).add(1.0), dim = 0)
-				# breakpoint()
+				surv_prob = torch.cumprod(hazards_oi_sel.mul(-1.0).add(1.0), dim = 0)
 				surv_prob_total.append(surv_prob.cpu().detach().numpy())
-			# breakpoint()
 			return np.asarray(surv_prob_total)
-		else: # competing events 
+		else: # multiple events
 			ef_surv_prob = []; cs_cif_total = []
-			# for event_idx, hazards_y_oi_ in enumerate(results['hazards_y']):
 			for event_idx in range(n_events):
-				hazards_y_oi = results['hazards_y'][0] # hazards_y = (1, n_samples, time_points, )
-				# breakpoint()
+				hazards_y_oi = results['hazards_y'][0] 
 				cs_cif_local = []
 				for hazards_oi, pred_range in zip(hazards_y_oi, batch_dict['pred_horizon_idx']):
 					hazards_oi_sel = hazards_oi[pred_range[0]:, n_events].view(-1) 
-					if event_idx == 0: # need to get event free survival probability only once
-						surv_prob = torch.cumprod(hazards_oi_sel, dim = 0)#.exp() # v1 Ren et al.
-						# surv_prob = torch.cumsum(hazards_oi_sel, dim = 0).mul(-1).exp() # v2 approximating survival integral
-						# surv_prob_alt = torch.cumprod(hazards_oi_sel.mul(-1.0).add(1.0), dim = 0)
-						# breakpoint()
+					if event_idx == 0: # event free survival
+						surv_prob = torch.cumprod(hazards_oi_sel, dim = 0)
 						ef_surv_prob.append(surv_prob.cpu().detach().numpy())
-
 					# cause-specific CIF
 					hazards_oi_sel_oi = hazards_oi[pred_range[0]:, event_idx].view(-1) 
 					cs_cif = torch.cumsum(torch.cat((hazards_oi_sel_oi[0][None], hazards_oi_sel_oi[1:] * torch.cumprod(hazards_oi_sel[:-1], dim = 0)), dim = 0), 0)
 					cs_cif_local.append(cs_cif.cpu().detach().numpy())
-
-				# ef_surv_prob_total.append(np.asarray(ef_surv_prob_total_local))
 				cs_cif_total.append(np.asarray(cs_cif_local))
-			# breakpoint()
-			print('\n')
-			cs_cif_max = []
-			for cs_cif_oi in cs_cif_total[0]:
-				cs_cif_max.append(np.max(cs_cif_oi))
-			print('max cs-cif: ', np.max(cs_cif_max))
-			print('\n')
+			# print('\n')
+			# cs_cif_max = []
+			# for cs_cif_oi in cs_cif_total[0]:
+			# 	cs_cif_max.append(np.max(cs_cif_oi))
+			# print('max cs-cif: ', np.max(cs_cif_max))
+			# print('\n')
 			return np.asarray(ef_surv_prob), cs_cif_total
-	elif surv_est == 'Cox':
-		if n_events == 1:
-			f_out_total = results['f_out_cox']
-			if batch_dict_train is not None:
-				event_times_train = batch_dict_train['event_times']
-				events_train = batch_dict_train['labels']	
-			elif events_info_train_tuple is not None:
-				event_times_train = events_info_train_tuple[0]
-				events_train = events_info_train_tuple[1]
-			else:
-				raise KeyError('Provide either batch_dict_train or events_info_train_tuple')
-
-			locally_loaded = 0
-			"""
-			f_out_total [num_traj : 1, num_samples : 100, num_time_points : 500, val : 1]
-			Returning survival probabilities of remaining time-to-event from latest observations
-			"""
-			try: 
-				with open('model_performance/' + filename_suffix + '/base_hazard_t_total_' + dataset + '_validation_' + str(validation) + '_.npy', 'rb') as f:
-					base_hazard_t_total = np.load(f)
-				print('Locally loading baseline hazard...')
-				locally_loaded = 1	
-				time_points_oi = torch.from_numpy(np.asarray([int(val) for val in last_observed_points]))
-			except:
-				base_hazard_t_total = []; #hazard_at_t_total = []
-			result = np.zeros([int((max_time_window - max(last_observed_points))/tp_res), np.shape(f_out_total)[1]]) # shape time points x num samples in test
-			# get the last hidden layer : sort of like proportional hazard model, but depends on the history
-			# just get the latest layer since we're interested in estimating remaining time-to-event given patients covariates
-			f_out_t = f_out_total[0].cpu() # choose traj 
-			exp_f_out_t = [float(val[0]) for val in f_out_t.exp()]
-			reached_non_zero_end = 0
-			# breakpoint()
-			# breakpoint()
-			for t in tqdm(np.arange(0, (max_time_window - max(last_observed_points)).cpu().numpy(), tp_res), desc = 'Computing survival function...'):
-				if locally_loaded:
-					# try:
-					# hazard_at_t = []
-					base_hazard = base_hazard_t_total[int(t/tp_res)] # loaded base hazards start from latest observation for each sample
-					# for idx, t_ in enumerate(last_observed_points): # last observed time across samples
-					# 	# breakpoint()
-					# 	# base_hazard_t = base_hazard_t_total[int(t/tp_res)]
-					# 	partial_hazard_at_t = float(f_out_t[idx, int(t_ + t), :][0].exp())
-					# 	base_hazard_oi = base_hazard[idx]
-					# 	# base_hazard_t.append(base_hazard)
-					# 	hazard_at_t.append(base_hazard_oi * partial_hazard_at_t)
-					# breakpoint()
-					time_points_select = time_points_oi + t
-					# choose corresponding points
-					f_out_t_oi = f_out_t[torch.arange(len(time_points_select)).long(), time_points_select.long(), :].view(-1).exp().cpu().detach().numpy()
-					# torch.index_select(f_out_t, 1, last_observed_points_oi)
-					hazard_at_t = base_hazard * f_out_t_oi
-				else:
-					base_hazard_t = []; hazard_at_t = []
-					for idx, t_ in enumerate(last_observed_points): # last observed time across samples
-						# given training samples under study at time t_, compute baseline hazard 
-						# note that everyone would have a different baseline hazard
-						# note this is a limitation of Cox-based model because you can't make a prediction beyond the longest follow-up time of the training cohort
-						try: 
-							base_hazard = float(events_train[event_times_train == t + int(t_)].sum())/len(event_times_train[event_times_train > t + int(t_)])
-							partial_hazard_at_t = float(f_out_t[idx, int(t_ + t), :][0].exp())
-							base_hazard_t.append(base_hazard)
-							hazard_at_t.append(base_hazard * partial_hazard_at_t)
-						# try:
-						# 	pass
-						except:
-							print('i) reached the end of non-zero denominator for baseline hazard')
-							print('OR')
-							print('ii) reached the end of prediction window for validation set')
-							print('Consider reducing prediction window for (i) or increasing prediction window for (ii)')
-							print('time : ', t + int(t_))
-							# breakpoint()
-							reached_non_zero_end = 1
-							break
-					if reached_non_zero_end:
-						break
-					base_hazard_t_total.append(base_hazard_t)
-					# hazard_at_t_total.append(hazard_at_t)
-				# term_oi = exp_f_out_t * np.asarray(base_hazard_t)
-				result[int(t/tp_res), :] = np.asarray(hazard_at_t)
-
-			if not locally_loaded:
-				with open('model_performance/' + filename_suffix + '/base_hazard_t_total_' + dataset + '_validation_' + str(validation) + '_.npy', 'wb') as f:
-					np.save(f, base_hazard_t_total)
-				print('Locally storing baseline hazard...')
-
-			# returning survival probabilities of remaining time-to-event from latest observations
-			return np.exp(-1 * np.cumsum(result.T, axis = 1))
-		else:
-			pass
+	else:
+		raise NotImplementedError
 
 def scaled_dot_product(q, k, v, mask=None):
 	d_k = q.size()[-1]
@@ -3409,7 +3308,6 @@ def scaled_dot_product(q, k, v, mask=None):
 	attn_logits = attn_logits / math.sqrt(d_k)
 	if mask is not None:
 		attn_logits = attn_logits.masked_fill(mask == 0, -9e15)
-		# breakpoint()
 	attention = F.softmax(attn_logits, dim=-1)
 	values = torch.matmul(attention, v)
 	return values, attention
@@ -3421,11 +3319,7 @@ def divide_list(l, n):
 	return list_split
 
 def evaluate_test_set(df_perf_result, model_info, batch_dict, surv_prob, rec_loss, cs_cif_total = None, run_id = None, min_event_time = 1, max_event_time = 700, tp_res = 1, n_events = 1, evaluate_only = False, filename_hyp_tuning = 'default', dataset = 'general', idx = None, missing_rate = 0.0):
-	"""
-	TODO : competing events vs normal event
-	"""
 	if n_events == 1: # non-competing events:
-
 		if dataset == 'mimic':
 			data_train_tuple = (model_info['events_info_train_tuple'][1], model_info['events_info_train_tuple'][2])
 			data_test_tuple = (batch_dict['labels'], batch_dict['remaining_time_to_event'])
@@ -3611,8 +3505,6 @@ def remove_timepoints_wo_obs(batch_dict):
 	batch_dict["data_to_predict"] = batch_dict["data_to_predict"][:, non_missing_tp_pred]
 	batch_dict["observed_tp_unnorm_dec"] = batch_dict["observed_tp_unnorm"][non_missing_tp_pred]#batch_dict["observed_tp_unnorm"][non_missing_tp_pred]
 	batch_dict["mask_predicted_data"] = batch_dict["mask_predicted_data"][:, non_missing_tp_pred]
-	# batch_dict['non_missing_tp_pred'] = non_missing_tp_pred
-	# breakpoint()
 	return batch_dict
 
 def create_perf_quantile_dict(quant_to_event_oi_train_test_surv_dict):
@@ -3622,10 +3514,6 @@ def create_perf_quantile_dict(quant_to_event_oi_train_test_surv_dict):
 	return quantiles_dict
 
 def func_plot_survival_curves(surv_prob, cs_cif_total, labels, remaining_time_to_event, last_observed_points, n_events = 1, curr_epoch = None, filename_suffix = None):
-	"""
-	surv_prob -> vanilla survival prob in a single-risk
-				 effect free survival in competing risks
-	"""
 	for idx_ in range(n_events):
 		print('Event : ', str(idx_ + 1), ', Plotting 10 random survival curves...')
 		fig, ax = plt.subplots()
@@ -3662,16 +3550,6 @@ def func_plot_survival_curves(surv_prob, cs_cif_total, labels, remaining_time_to
 			t = np.arange(last_obsved_time, last_obsved_time + len(surv), 1) - last_obsved_time
 			ax.plot(t, surv, label = 'Remaining Event time : ' + str(remaining_tte) + ', Event : ' + str(label) + ', Starting time : ' + str(last_obsved_time))# + ', Observed tps : ' + str(observed_tp_for_j))
 			ax.set_ylim([0, 1])
-
-			# if idx_ == 0:
-			# 	surv_total.append(surv)
-
-		# print('\n')
-		# cs_cif_max = []
-		# for cs_cif_oi in cs_cif_total[0]:
-		# 	cs_cif_max.append(np.max(cs_cif_oi))
-		# print('max cs-cif plot : ', np.max(cs_cif_max))
-		# print('\n')
 		
 		ax.set(xlabel='time (hours)', ylabel='Surv Prob' if n_events == 1 else 'CIF')
 		ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.095))
@@ -3685,9 +3563,7 @@ def get_cs_rmft_metric(cs_cif_cum, pred_window = 180, max_time = 700, last_obser
 	"""
 	cause specific restricted mean failture time (RMST)
 	precisely this returns expected number of years lost before the end of pred_window
-	t -> CS RMST
-
-	as pred_window -> infinity, 1 - metric corresponds to the mean survival time
+	https://bmcmedresmethodol.biomedcentral.com/track/pdf/10.1186/s12874-021-01213-0.pdf
 	"""
 	if last_observed_points_oi is not None:
 		try:
